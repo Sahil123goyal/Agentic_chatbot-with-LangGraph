@@ -1,3 +1,4 @@
+
 name: Streamlit AWS CI/CD
 
 on:
@@ -6,11 +7,8 @@ on:
       - main
     paths-ignore:
       - "README.md"
-
-  # Allows you to run the workflow manually
   workflow_dispatch:
 
-# Prevent two deployments from running at the same time
 concurrency:
   group: agentic-chatbot-production
   cancel-in-progress: true
@@ -38,7 +36,6 @@ jobs:
         run: |
           echo "Running unit tests"
 
-
   # ============================================================
   # 2. BUILD AND PUSH IMAGE TO DOCKER HUB
   # ============================================================
@@ -47,15 +44,21 @@ jobs:
     needs: integration
     runs-on: ubuntu-latest
 
+    outputs:
+      image_path: ${{ steps.image.outputs.path }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Docker image settings
+      - name: Validate and normalize Docker image settings
+        id: image
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
         run: |
+          set -e
+
           if [ -z "$DOCKER_USERNAME" ]; then
             echo "DOCKER_USERNAME secret is missing."
             exit 1
@@ -66,7 +69,21 @@ jobs:
             exit 1
           fi
 
-          echo "Docker image settings are configured."
+          DOCKER_USERNAME=$(echo "$DOCKER_USERNAME" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+
+          if ! echo "$DOCKER_USERNAME" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*$'; then
+            echo "Invalid Docker Hub username format."
+            exit 1
+          fi
+
+          if ! echo "$IMAGE_NAME" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*$'; then
+            echo "Invalid Docker repository name."
+            exit 1
+          fi
+
+          echo "path=${DOCKER_USERNAME}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Docker image path validated."
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -84,11 +101,10 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}:main
-            ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.path }}:main
+            ${{ steps.image.outputs.path }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
 
   # ============================================================
   # 3. DEPLOY TO AWS EC2 SELF-HOSTED RUNNER
@@ -107,55 +123,40 @@ jobs:
 
       - name: Validate application secrets
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
           LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
           LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          if [ -z "$GOOGLE_API_KEY" ]; then
-            echo "GOOGLE_API_KEY secret is missing."
-            exit 1
-          fi
+          set -e
 
-          if [ -z "$TAVILY_API_KEY" ]; then
-            echo "TAVILY_API_KEY secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$OPENWEATHER_API_KEY" ]; then
-            echo "OPENWEATHER_API_KEY secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$LANGSMITH_TRACING" ]; then
-            echo "LANGSMITH_TRACING secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$LANGSMITH_ENDPOINT" ]; then
-            echo "LANGSMITH_ENDPOINT secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$LANGSMITH_API_KEY" ]; then
-            echo "LANGSMITH_API_KEY secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$LANGSMITH_PROJECT" ]; then
-            echo "LANGSMITH_PROJECT secret is missing."
-            exit 1
-          fi
+          for key in \
+            GROQ_API_KEY \
+            TAVILY_API_KEY \
+            OPENWEATHER_API_KEY \
+            LANGSMITH_TRACING \
+            LANGSMITH_ENDPOINT \
+            LANGSMITH_API_KEY \
+            LANGSMITH_PROJECT \
+            HF_TOKEN
+          do
+            if [ -z "${!key}" ]; then
+              echo "$key secret is missing."
+              exit 1
+            fi
+          done
 
           echo "All required application secrets are configured."
 
       - name: Pull latest Docker image
         env:
-          IMAGE_PATH: ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}
+          IMAGE_PATH: ${{ needs.push_to_registry.outputs.image_path }}
         run: |
+          set -e
           docker pull "${IMAGE_PATH}:main"
 
       - name: Stop and remove existing container
@@ -164,31 +165,30 @@ jobs:
 
       - name: Run Streamlit container
         env:
-          IMAGE_PATH: ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}
-
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          IMAGE_PATH: ${{ needs.push_to_registry.outputs.image_path }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-
           LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
           LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
-
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -e
+
           docker run -d \
             --restart unless-stopped \
             --name stapp \
             -p 8501:8501 \
-            -e OPENAI_API_KEY \
-            -e GOOGLE_API_KEY \
+            -e GROQ_API_KEY \
             -e TAVILY_API_KEY \
             -e OPENWEATHER_API_KEY \
             -e LANGSMITH_TRACING \
             -e LANGSMITH_ENDPOINT \
             -e LANGSMITH_API_KEY \
             -e LANGSMITH_PROJECT \
+            -e HF_TOKEN \
             "${IMAGE_PATH}:main"
 
       - name: Verify container is running
